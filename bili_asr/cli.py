@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
+import os
 import sys
 import json
 import argparse
 from .core import transcribe, TranscribeResult
 from . import __version__
 
-def login_interactive(cookie_file: str = "cookies.json"):
+DEFAULT_COOKIE_FILE = os.path.join(os.path.expanduser("~"), ".bili-asr", "cookies.json")
+
+def login_interactive(cookie_file: str = DEFAULT_COOKIE_FILE):
     import stream_gears
     print("=" * 60)
     print("【B 站 Cookie 登录授权设置】")
@@ -36,7 +39,7 @@ def main():
     parser.add_argument("--delete", action="store_true", help="转写完成后自动尝试从 B 站删除临时视频")
     parser.add_argument("--keep-temp", action="store_true", help="保留本地生成的临时 MP4 视频")
     parser.add_argument("--title", help="自定义视频投稿标题")
-    parser.add_argument("--cookie-file", default="cookies.json", help="Cookie 配置文件路径 (默认 cookies.json)")
+    parser.add_argument("--cookie-file", default=DEFAULT_COOKIE_FILE, help="Cookie 配置文件路径 (默认 ~/.bili-asr/cookies.json)")
     parser.add_argument("--login", action="store_true", help="配置或更新 B 站 Cookie 凭证")
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
 
