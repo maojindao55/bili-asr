@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bili-asr"
+version = "0.1.0"
+description = "A zero-cost, high-speed CLI tool for transcribing audio to SRT/TXT using Bilibili Cloud AI (designed for humans and AI Agents)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+    "imageio-ffmpeg>=0.5.0",
+    "biliup>=1.3.0"
+]
+
+[project.scripts]
+bili-asr = "bili_asr.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bili_asr*"]

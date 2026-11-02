@@ -1,0 +1,27 @@
+# 凭证与隐私文件 (严禁提交)
+cookies.json
+*.cookie
+*.env
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# 媒体与中间测试文件
+*.mp3
+*.mp4
+*.wav
+*.flac
+*.m4a
+*.srt
+*.txt
+*_raw.json
+temp_*.mp4
+
+# IDE 配置
+.vscode/
+.idea/
