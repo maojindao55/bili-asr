@@ -139,8 +139,27 @@ def upload_to_bilibili(mp4_path: str, cookie_file: str, title: str, quiet: bool 
     )
     log("[+] 视频上传成功 (已设为【仅自己可见】)！", quiet)
 
-def get_latest_archive(cookie_str: str) -> Optional[Dict[str, Any]]:
-    url = "https://member.bilibili.com/x/web/archives?status=all&pn=1&ps=1"
+def fetch_cid_by_bvid(bvid: str, cookie_str: str) -> Optional[int]:
+    """兜底：会员接口的 videos 列表可能为空，改用 view 接口取 cid (需带本人 Cookie 才能看到私密稿件)"""
+    if not bvid:
+        return None
+    url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT,
+        "Cookie": cookie_str,
+        "Referer": f"https://www.bilibili.com/video/{bvid}"
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("data", {}).get("cid")
+    except Exception:
+        return None
+
+def get_latest_archive(cookie_str: str, title: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """查询稿件列表。传入 title 时按标题精确匹配本次上传的稿件，
+    避免账号里残留上一条临时稿件时误绑到别的视频。"""
+    url = "https://member.bilibili.com/x/web/archives?status=all&pn=1&ps=20"
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
         "Cookie": cookie_str,
@@ -150,18 +169,22 @@ def get_latest_archive(cookie_str: str) -> Optional[Dict[str, Any]]:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             archives = data.get("data", {}).get("arc_audits", [])
-            if archives:
-                arc = archives[0]
+            for arc in archives:
                 archive_info = arc.get("Archive", {})
+                if title and archive_info.get("title") != title:
+                    continue
                 videos = arc.get("videos", [])
                 cid = videos[0].get("cid") if videos else None
+                if not cid:
+                    cid = fetch_cid_by_bvid(archive_info.get("bvid"), cookie_str)
                 return {
                     "bvid": archive_info.get("bvid"),
                     "aid": archive_info.get("aid"),
                     "title": archive_info.get("title"),
                     "state": archive_info.get("state"),
                     "state_desc": archive_info.get("state_desc"),
-                    "cid": cid
+                    "cid": cid,
+                    "duration": archive_info.get("duration") or 0
                 }
     except Exception:
         pass
@@ -259,7 +282,7 @@ def transcribe(
         bvid, aid, cid = None, None, None
         for _ in range(15):
             time.sleep(3)
-            info = get_latest_archive(cookie_str)
+            info = get_latest_archive(cookie_str, upload_title)
             if info:
                 bvid = info["bvid"]
                 aid = info["aid"]
@@ -272,32 +295,64 @@ def transcribe(
 
         log("[*] 等待转码、审核与 AI 语音识别生成字幕...", quiet)
         start_wait = time.time()
-        subtitle_url = None
+        sub_data = None
+        last_sub_end = 0.0
+        last_growth = None
+        STALL_GRACE = 300  # 字幕停止增长超过该秒数且未达标时，按当前结果返回
 
         while True:
             elapsed = int(time.time() - start_wait)
-            info = get_latest_archive(cookie_str)
-            cid = info.get("cid") or cid
+            info = get_latest_archive(cookie_str, upload_title)
+            cid = (info or {}).get("cid") or cid
+
+            if info and info.get("state") in (-2, -16, -40):
+                raise RuntimeError(
+                    f"稿件处理失败 (state={info.get('state')}, {info.get('state_desc')})，AI 字幕无法生成。"
+                )
 
             if cid:
                 subtitle_url = query_subtitle_url(bvid, cid, cookie_str)
                 if subtitle_url:
-                    log(f"\n[+] 成功获取 AI 智能字幕！(耗时 {elapsed} 秒)", quiet)
-                    break
+                    try:
+                        req = urllib.request.Request(subtitle_url, headers={"User-Agent": USER_AGENT})
+                        with urllib.request.urlopen(req, timeout=15) as resp:
+                            candidate = json.loads(resp.read().decode("utf-8"))
+                    except Exception:
+                        candidate = None
+                    if candidate:
+                        cand_body = candidate.get("body") or []
+                        sub_end = float(cand_body[-1].get("to", 0.0)) if cand_body else 0.0
+                        expect = float(info.get("duration") or 0)
+                        # B 站 AI 字幕是渐进生成的：先出一部分，几分钟后才补全。
+                        # 覆盖到全片 95% 以上才算完成，否则继续轮询。
+                        if not expect or sub_end >= expect * 0.95:
+                            log(f"\n[+] 成功获取 AI 智能字幕！(耗时 {elapsed} 秒, 覆盖 {sub_end:.0f}/{expect or sub_end:.0f} 秒)", quiet)
+                            sub_data = candidate
+                            break
+                        # 片尾若是音乐/垫乐（无语音），字幕只会覆盖到最后一句话，
+                        # 覆盖率永远到不了 95%。停止增长超过宽限期就按当前结果返回。
+                        if sub_end > 0 and sub_end != last_sub_end:
+                            last_sub_end = sub_end
+                            last_growth = time.time()
+                        elif last_growth and time.time() - last_growth > STALL_GRACE:
+                            log(f"\n[!] 字幕已 {int(time.time() - last_growth)} 秒未增长 "
+                                f"(覆盖 {sub_end:.0f}/{expect:.0f} 秒，可能片尾无语音)，按当前结果返回。", quiet)
+                            sub_data = candidate
+                            break
 
             if not quiet:
-                sys.stderr.write(f"\r[等待中] 已等待: {elapsed} 秒 ...")
+                progress = f", 字幕已生成 {last_sub_end:.0f} 秒" if last_sub_end else ""
+                sys.stderr.write(f"\r[等待中] 已等待: {elapsed} 秒{progress} ...")
                 sys.stderr.flush()
 
             time.sleep(12)
 
             if elapsed > timeout:
+                if last_sub_end:
+                    raise TimeoutError(
+                        f"转录超时 (超过 {timeout} 秒)，字幕仍未生成完整 (已覆盖 {last_sub_end:.0f} 秒)"
+                    )
                 raise TimeoutError(f"转录超时 (超过 {timeout} 秒)")
-
-        # 拉取并解析字幕
-        req = urllib.request.Request(subtitle_url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req) as resp:
-            sub_data = json.loads(resp.read().decode("utf-8"))
 
         body = sub_data.get("body", [])
         duration = float(body[-1].get("to", 0.0)) if body else 0.0
